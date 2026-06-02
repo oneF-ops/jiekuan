@@ -4,20 +4,23 @@ const cron = require('node-cron')
 
 const bot = new Telegraf(process.env.BOT_TOKEN)
 
-// 管理员
-const ADMINS = [process.env.ADMIN_ID]
-
-// 数据文件
 const DATA_FILE = './data.json'
 
-// ================== 数据操作 ==================
-function loadData() {
-    if (!fs.existsSync(DATA_FILE)) return []
+// ================== 数据结构 ==================
+function loadDB() {
+    if (!fs.existsSync(DATA_FILE)) {
+        return { admins: [], loans: [] }
+    }
     return JSON.parse(fs.readFileSync(DATA_FILE))
 }
 
-function saveData(data) {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2))
+function saveDB(db) {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2))
+}
+
+// ================== 权限判断 ==================
+function isAdmin(ctx, db) {
+    return db.admins.includes(ctx.from.id)
 }
 
 // ================== 金额解析 ==================
@@ -25,11 +28,6 @@ function parseAmount(str) {
     str = str.toLowerCase()
     if (str.includes('w')) return parseFloat(str) * 10000
     return parseFloat(str)
-}
-
-// ================== 防重复借款 ==================
-function hasUnpaidLoan(data, user) {
-    return data.some(i => i.user === user && i.status === 'unpaid')
 }
 
 // ================== 自动借款识别 ==================
@@ -43,11 +41,11 @@ bot.on('text', (ctx) => {
     const amount = parseAmount(match[2])
     if (!amount) return
 
-    let data = loadData()
+    const db = loadDB()
 
-    // ❌ 防重复借款
-    if (hasUnpaidLoan(data, user)) {
-        return ctx.reply(`⚠️ ${user} 还有未结清借款，无法再次借款`)
+    // 防重复借款
+    if (db.loans.some(i => i.user === user && i.status === 'unpaid')) {
+        return ctx.reply('⚠️ 你还有未还清借款')
     }
 
     const interest = amount * 0.3
@@ -56,7 +54,7 @@ bot.on('text', (ctx) => {
     const now = new Date()
     const due = new Date(now.getTime() + 24 * 60 * 60 * 1000)
 
-    const record = {
+    db.loans.push({
         user,
         amount,
         interest,
@@ -64,10 +62,9 @@ bot.on('text', (ctx) => {
         time: now.toISOString(),
         due: due.toISOString(),
         status: 'unpaid'
-    }
+    })
 
-    data.push(record)
-    saveData(data)
+    saveDB(db)
 
     ctx.reply(
 `📌 借款成功
@@ -76,116 +73,158 @@ bot.on('text', (ctx) => {
 本金：${amount}
 利息：${interest}
 应还：${total}
-最晚还款：${due.toLocaleString()}`
+到期：${due.toLocaleString()}`
     )
 })
 
+
+// ================== 添加管理员 ==================
+bot.command('addadmin', (ctx) => {
+    const db = loadDB()
+    if (!isAdmin(ctx, db)) return ctx.reply('❌ 无权限')
+
+    const id = parseInt(ctx.message.text.split(' ')[1])
+    if (!id) return ctx.reply('用法：/addadmin 123456')
+
+    if (!db.admins.includes(id)) {
+        db.admins.push(id)
+        saveDB(db)
+    }
+
+    ctx.reply(`✅ 已添加管理员：${id}`)
+})
+
+// ================== 删除管理员 ==================
+bot.command('deladmin', (ctx) => {
+    const db = loadDB()
+    if (!isAdmin(ctx, db)) return ctx.reply('❌ 无权限')
+
+    const id = parseInt(ctx.message.text.split(' ')[1])
+    if (!id) return ctx.reply('用法：/deladmin 123456')
+
+    db.admins = db.admins.filter(a => a !== id)
+    saveDB(db)
+
+    ctx.reply(`🗑 已删除管理员：${id}`)
+})
+
+// ================== 管理员列表 ==================
+bot.command('admins', (ctx) => {
+    const db = loadDB()
+
+    if (!isAdmin(ctx, db)) return ctx.reply('❌ 无权限')
+
+    if (!db.admins.length) return ctx.reply('暂无管理员')
+
+    ctx.reply(
+        '👮 当前管理员：\n' +
+        db.admins.map(a => `- ${a}`).join('\n')
+    )
+})
+
+
 // ================== 借款列表 ==================
 bot.command('loanlist', (ctx) => {
-    const data = loadData()
+    const db = loadDB()
 
-    if (!data.length) return ctx.reply('暂无记录')
+    let msg = '📊 借款名单\n\n'
 
-    let msg = '📊 当前借款名单\n\n'
-
-    data.forEach(d => {
+    db.loans.forEach(d => {
         msg += `${d.user} | ${d.amount} | ${d.total} | ${d.status}\n`
     })
 
     ctx.reply(msg)
 })
 
+
 // ================== 标记还款 ==================
 bot.command('repay', (ctx) => {
-    if (!ADMINS.includes(ctx.from.id.toString())) return
+    const db = loadDB()
+    if (!isAdmin(ctx, db)) return ctx.reply('❌ 无权限')
 
     const name = ctx.message.text.split(' ')[1]
-    let data = loadData()
 
-    const item = data.find(i => i.user === name && i.status === 'unpaid')
-    if (!item) return ctx.reply('未找到未还记录')
+    const loan = db.loans.find(i => i.user === name && i.status === 'unpaid')
+    if (!loan) return ctx.reply('未找到记录')
 
-    item.status = 'paid'
-    saveData(data)
+    loan.status = 'paid'
+    saveDB(db)
 
     ctx.reply(`✅ 已标记 ${name} 已还款`)
 })
 
+
 // ================== 删除记录 ==================
 bot.command('remove', (ctx) => {
-    if (!ADMINS.includes(ctx.from.id.toString())) return
+    const db = loadDB()
+    if (!isAdmin(ctx, db)) return ctx.reply('❌ 无权限')
 
     const name = ctx.message.text.split(' ')[1]
-    let data = loadData()
 
-    data = data.filter(i => i.user !== name)
-    saveData(data)
+    db.loans = db.loans.filter(i => i.user !== name)
+    saveDB(db)
 
     ctx.reply(`🗑 已删除 ${name}`)
 })
 
-// ================== 统计功能 ==================
+
+// ================== 统计 ==================
 bot.command('stats', (ctx) => {
-    const data = loadData()
+    const db = loadDB()
 
-    const totalLoan = data.reduce((a, b) => a + b.amount, 0)
-    const unpaid = data.filter(i => i.status === 'unpaid').reduce((a, b) => a + b.total, 0)
-    const paid = data.filter(i => i.status === 'paid').reduce((a, b) => a + b.total, 0)
-
-    const users = new Set(data.map(i => i.user)).size
+    const total = db.loans.reduce((a, b) => a + b.amount, 0)
+    const unpaid = db.loans.filter(i => i.status === 'unpaid').reduce((a, b) => a + b.total, 0)
+    const paid = db.loans.filter(i => i.status === 'paid').reduce((a, b) => a + b.total, 0)
 
     ctx.reply(
-`📊 系统统计
+`📊 统计
 
-借款总额：${totalLoan}
-未还总额：${unpaid}
-已还总额：${paid}
-借款人数：${users}`
+总借出：${total}
+未还：${unpaid}
+已还：${paid}`
     )
 })
+
 
 // ================== 用户查询 ==================
 bot.command('user', (ctx) => {
     const name = ctx.message.text.split(' ')[1]
-    if (!name) return ctx.reply('用法：/user A')
 
-    const data = loadData().filter(i => i.user === name)
+    const db = loadDB()
+    const list = db.loans.filter(i => i.user === name)
 
-    if (!data.length) return ctx.reply('无记录')
+    if (!list.length) return ctx.reply('无记录')
 
-    let msg = `👤 ${name} 借款记录\n\n`
-
-    data.forEach(d => {
-        msg += `本金:${d.amount} 应还:${d.total} 状态:${d.status}\n`
-    })
-
-    ctx.reply(msg)
+    ctx.reply(
+        list.map(i =>
+            `${i.user} ${i.amount} 应还:${i.total} ${i.status}`
+        ).join('\n')
+    )
 })
 
-// ================== 到期提醒（每小时） ==================
+
+// ================== 到期提醒 ==================
 cron.schedule('0 * * * *', () => {
-    const data = loadData()
+    const db = loadDB()
     const now = Date.now()
 
-    data.forEach(d => {
-        if (d.status !== 'unpaid') return
+    db.loans.forEach(l => {
+        if (l.status !== 'unpaid') return
 
-        const due = new Date(d.due).getTime()
+        const due = new Date(l.due).getTime()
         const diff = due - now
 
-        // 提前1小时提醒
         if (diff < 3600000 && diff > 0) {
             bot.telegram.sendMessage(
-                process.env.ADMIN_ID,
-                `⚠️ ${d.user} 即将到期，还剩不到1小时`
+                db.admins[0],
+                `⚠️ ${l.user} 即将到期`
             )
         }
 
-        // 已超时
         if (diff <= 0) {
             bot.telegram.sendMessage(
-                process.env.ADMIN_ID,
-                `🚨 ${d.user} 已逾期未还款`
+                db.admins[0],
+                `🚨 ${l.user} 已逾期`
             )
         }
     })
