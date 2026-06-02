@@ -5,12 +5,28 @@ const bot = new Telegraf(process.env.BOT_TOKEN)
 
 const DATA_FILE = './data.json'
 
+// 🔥 这里改成你的 Telegram ID（超级管理员，永远最高权限）
+const SUPER_ADMIN = 8431715705
+
 // ================== DB ==================
 function loadDB() {
     if (!fs.existsSync(DATA_FILE)) {
-        return { admins: [], loans: [] }
+        const db = {
+            admins: [SUPER_ADMIN],
+            loans: []
+        }
+        fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2))
+        return db
     }
-    return JSON.parse(fs.readFileSync(DATA_FILE))
+
+    const db = JSON.parse(fs.readFileSync(DATA_FILE))
+
+    // 🔥 防止被清空管理员导致锁死
+    if (!db.admins || db.admins.length === 0) {
+        db.admins = [SUPER_ADMIN]
+    }
+
+    return db
 }
 
 function saveDB(db) {
@@ -19,12 +35,8 @@ function saveDB(db) {
 
 // ================== 权限 ==================
 function isAdmin(ctx, db) {
-    return db.admins.includes(ctx.from.id)
+    return ctx.from.id === SUPER_ADMIN || db.admins.includes(ctx.from.id)
 }
-
-// ================== 状态 ==================
-const repaySelect = new Map()
-const deleteSelect = new Map()
 
 // ================== 面板 ==================
 bot.command('panel', (ctx) => {
@@ -38,6 +50,7 @@ bot.command('panel', (ctx) => {
             [Markup.button.callback('💰 标记还款', 'repay_menu')],
             [Markup.button.callback('🗑 删除记录', 'delete_menu')],
             [Markup.button.callback('📈 系统统计', 'stats')],
+            [Markup.button.callback('👮 管理员管理', 'admin_menu')],
         ])
     )
 })
@@ -76,16 +89,13 @@ bot.action('stats', (ctx) => {
     )
 })
 
-// ================== 💰 还款按钮菜单 ==================
+// ================== 💰 还款按钮 ==================
 bot.action('repay_menu', (ctx) => {
     const db = loadDB()
     if (!isAdmin(ctx, db)) return ctx.reply('❌ 无权限')
 
     const users = db.loans.filter(i => i.status === 'unpaid')
-
     if (!users.length) return ctx.reply('暂无未还记录')
-
-    repaySelect.set(ctx.from.id, true)
 
     const buttons = users.map(u =>
         [Markup.button.callback(
@@ -100,35 +110,29 @@ bot.action('repay_menu', (ctx) => {
     )
 })
 
-// ================== 🧠 点击还款 ==================
+// ================== 还款 ==================
 bot.action(/repay_(.+)/, (ctx) => {
     const db = loadDB()
     if (!isAdmin(ctx, db)) return ctx.reply('❌ 无权限')
 
-    const loanId = ctx.match[1]
-
-    const loan = db.loans.find(i => i.id == loanId)
+    const loan = db.loans.find(i => i.id == ctx.match[1])
     if (!loan) return ctx.reply('❌ 未找到记录')
 
     loan.status = 'paid'
     saveDB(db)
 
     ctx.answerCbQuery('已还款')
-    ctx.reply(`✅ 已标记还款：${loan.username} | ￥${loan.total}`)
+    ctx.reply(`✅ 已标记还款：${loan.username}`)
 })
 
-// ================== 🗑 删除菜单 ==================
+// ================== 🗑 删除按钮 ==================
 bot.action('delete_menu', (ctx) => {
     const db = loadDB()
     if (!isAdmin(ctx, db)) return ctx.reply('❌ 无权限')
 
-    const users = db.loans
+    if (!db.loans.length) return ctx.reply('暂无记录')
 
-    if (!users.length) return ctx.reply('暂无记录')
-
-    deleteSelect.set(ctx.from.id, true)
-
-    const buttons = users.map(u =>
+    const buttons = db.loans.map(u =>
         [Markup.button.callback(
             `🗑 ${u.username} | ￥${u.total}`,
             `del_${u.id}`
@@ -141,24 +145,79 @@ bot.action('delete_menu', (ctx) => {
     )
 })
 
-// ================== 🗑 点击删除 ==================
+// ================== 删除 ==================
 bot.action(/del_(.+)/, (ctx) => {
     const db = loadDB()
     if (!isAdmin(ctx, db)) return ctx.reply('❌ 无权限')
 
-    const loanId = ctx.match[1]
-
-    const loan = db.loans.find(i => i.id == loanId)
+    const loan = db.loans.find(i => i.id == ctx.match[1])
     if (!loan) return ctx.reply('❌ 未找到记录')
 
-    db.loans = db.loans.filter(i => i.id != loanId)
+    db.loans = db.loans.filter(i => i.id != loan.id)
     saveDB(db)
 
     ctx.answerCbQuery('已删除')
     ctx.reply(`🗑 已删除：${loan.username}`)
 })
 
-// ================== 统一消息入口（借款） ==================
+// ================== 管理员菜单 ==================
+bot.action('admin_menu', (ctx) => {
+    const db = loadDB()
+    if (!isAdmin(ctx, db)) return ctx.reply('❌ 无权限')
+
+    ctx.reply(
+        '👮 管理员管理',
+        Markup.inlineKeyboard([
+            [Markup.button.callback('➕ 添加管理员', 'add_admin')],
+            [Markup.button.callback('➖ 删除管理员', 'del_admin')],
+            [Markup.button.callback('👮 管理员列表', 'list_admin')],
+        ])
+    )
+})
+
+// ================== 添加管理员 ==================
+bot.action('add_admin', (ctx) => {
+    ctx.reply('请输入要添加的 userId：')
+
+    bot.once('text', (msgCtx) => {
+        const db = loadDB()
+        if (!isAdmin(msgCtx, db)) return msgCtx.reply('❌ 无权限')
+
+        const uid = parseInt(msgCtx.message.text)
+
+        if (!db.admins.includes(uid)) {
+            db.admins.push(uid)
+            saveDB(db)
+        }
+
+        msgCtx.reply('✅ 已添加管理员')
+    })
+})
+
+// ================== 删除管理员 ==================
+bot.action('del_admin', (ctx) => {
+    ctx.reply('请输入要删除的 userId：')
+
+    bot.once('text', (msgCtx) => {
+        const db = loadDB()
+        if (!isAdmin(msgCtx, db)) return msgCtx.reply('❌ 无权限')
+
+        const uid = parseInt(msgCtx.message.text)
+
+        db.admins = db.admins.filter(a => a !== uid)
+        saveDB(db)
+
+        msgCtx.reply('🗑 已删除管理员')
+    })
+})
+
+// ================== 管理员列表 ==================
+bot.action('list_admin', (ctx) => {
+    const db = loadDB()
+    ctx.reply('👮 管理员列表：\n' + db.admins.join('\n'))
+})
+
+// ================== 借款 ==================
 bot.on('text', (ctx) => {
 
     const db = loadDB()
@@ -168,11 +227,7 @@ bot.on('text', (ctx) => {
     if (!match) return
 
     let amount = parseFloat(match[1])
-    if (isNaN(amount)) return ctx.reply('金额错误')
-
-    if (match[2]) {
-        amount *= 10000
-    }
+    if (match[2]) amount *= 10000
 
     const userId = ctx.from.id
     const username = ctx.from.username || ctx.from.first_name
@@ -184,8 +239,6 @@ bot.on('text', (ctx) => {
     const interest = amount * 0.3
     const total = amount + interest
 
-    const due = new Date(Date.now() + 86400000)
-
     db.loans.push({
         id: Date.now(),
         userId,
@@ -193,9 +246,8 @@ bot.on('text', (ctx) => {
         amount,
         interest,
         total,
-        time: new Date().toISOString(),
-        due: due.toISOString(),
-        status: 'unpaid'
+        status: 'unpaid',
+        time: new Date().toISOString()
     })
 
     saveDB(db)
@@ -206,8 +258,7 @@ bot.on('text', (ctx) => {
 用户：${username}
 本金：${amount}
 利息：${interest}
-应还：${total}
-到期：${due.toLocaleString()}`
+应还：${total}`
     )
 })
 
