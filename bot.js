@@ -22,11 +22,9 @@ function isAdmin(ctx, db) {
     return db.admins.includes(ctx.from.id)
 }
 
-// ================== 状态机 ==================
-const repayStep = new Map()
-const deleteStep = new Map()
-const addAdminStep = new Map()
-const delAdminStep = new Map()
+// ================== 状态 ==================
+const repaySelect = new Map()
+const deleteSelect = new Map()
 
 // ================== 面板 ==================
 bot.command('panel', (ctx) => {
@@ -40,7 +38,6 @@ bot.command('panel', (ctx) => {
             [Markup.button.callback('💰 标记还款', 'repay_menu')],
             [Markup.button.callback('🗑 删除记录', 'delete_menu')],
             [Markup.button.callback('📈 系统统计', 'stats')],
-            [Markup.button.callback('👮 管理员管理', 'admin_menu')],
         ])
     )
 })
@@ -79,129 +76,99 @@ bot.action('stats', (ctx) => {
     )
 })
 
-// ================== 还款 ==================
+// ================== 💰 还款按钮菜单 ==================
 bot.action('repay_menu', (ctx) => {
     const db = loadDB()
     if (!isAdmin(ctx, db)) return ctx.reply('❌ 无权限')
 
-    repayStep.set(ctx.from.id, true)
-    ctx.reply('请输入用户ID（userId）来标记还款：')
+    const users = db.loans.filter(i => i.status === 'unpaid')
+
+    if (!users.length) return ctx.reply('暂无未还记录')
+
+    repaySelect.set(ctx.from.id, true)
+
+    const buttons = users.map(u =>
+        [Markup.button.callback(
+            `👤 ${u.username} | ￥${u.total}`,
+            `repay_${u.id}`
+        )]
+    )
+
+    ctx.reply(
+        '请选择要标记还款的用户：',
+        Markup.inlineKeyboard(buttons)
+    )
 })
 
-// ================== 删除 ==================
+// ================== 🧠 点击还款 ==================
+bot.action(/repay_(.+)/, (ctx) => {
+    const db = loadDB()
+    if (!isAdmin(ctx, db)) return ctx.reply('❌ 无权限')
+
+    const loanId = ctx.match[1]
+
+    const loan = db.loans.find(i => i.id == loanId)
+    if (!loan) return ctx.reply('❌ 未找到记录')
+
+    loan.status = 'paid'
+    saveDB(db)
+
+    ctx.answerCbQuery('已还款')
+    ctx.reply(`✅ 已标记还款：${loan.username} | ￥${loan.total}`)
+})
+
+// ================== 🗑 删除菜单 ==================
 bot.action('delete_menu', (ctx) => {
     const db = loadDB()
     if (!isAdmin(ctx, db)) return ctx.reply('❌ 无权限')
 
-    deleteStep.set(ctx.from.id, true)
-    ctx.reply('请输入用户ID（userId）来删除记录：')
-})
+    const users = db.loans
 
-// ================== 管理员 ==================
-bot.action('admin_menu', (ctx) => {
-    const db = loadDB()
-    if (!isAdmin(ctx, db)) return ctx.reply('❌ 无权限')
+    if (!users.length) return ctx.reply('暂无记录')
+
+    deleteSelect.set(ctx.from.id, true)
+
+    const buttons = users.map(u =>
+        [Markup.button.callback(
+            `🗑 ${u.username} | ￥${u.total}`,
+            `del_${u.id}`
+        )]
+    )
 
     ctx.reply(
-        '👮 管理员管理',
-        Markup.inlineKeyboard([
-            [Markup.button.callback('➕ 添加管理员', 'add_admin')],
-            [Markup.button.callback('➖ 删除管理员', 'del_admin')],
-            [Markup.button.callback('👮 管理员列表', 'list_admin')],
-        ])
+        '请选择要删除的记录：',
+        Markup.inlineKeyboard(buttons)
     )
 })
 
-bot.action('add_admin', (ctx) => {
-    addAdminStep.set(ctx.from.id, true)
-    ctx.reply('请输入管理员 userId：')
-})
-
-bot.action('del_admin', (ctx) => {
-    delAdminStep.set(ctx.from.id, true)
-    ctx.reply('请输入要删除的管理员 userId：')
-})
-
-bot.action('list_admin', (ctx) => {
+// ================== 🗑 点击删除 ==================
+bot.action(/del_(.+)/, (ctx) => {
     const db = loadDB()
-    ctx.reply('👮 管理员列表：\n' + db.admins.join('\n'))
+    if (!isAdmin(ctx, db)) return ctx.reply('❌ 无权限')
+
+    const loanId = ctx.match[1]
+
+    const loan = db.loans.find(i => i.id == loanId)
+    if (!loan) return ctx.reply('❌ 未找到记录')
+
+    db.loans = db.loans.filter(i => i.id != loanId)
+    saveDB(db)
+
+    ctx.answerCbQuery('已删除')
+    ctx.reply(`🗑 已删除：${loan.username}`)
 })
 
-// ================== 统一消息入口 ==================
+// ================== 统一消息入口（借款） ==================
 bot.on('text', (ctx) => {
 
     const db = loadDB()
-    const id = ctx.from.id
     const text = ctx.message.text.trim()
 
-    console.log('收到:', text)
-
-    // ❌ 私聊禁止（可按需开启）
-    // if (ctx.chat.type === 'private') return
-
-    // ================== 还款 ==================
-    if (repayStep.get(id)) {
-
-        const loan = db.loans.find(i =>
-            i.userId === parseInt(text) && i.status === 'unpaid'
-        )
-
-        if (!loan) return ctx.reply('未找到未还记录')
-
-        loan.status = 'paid'
-        saveDB(db)
-
-        repayStep.delete(id)
-        return ctx.reply('✅ 已标记还款')
-    }
-
-    // ================== 删除 ==================
-    if (deleteStep.get(id)) {
-
-        const uid = parseInt(text)
-
-        db.loans = db.loans.filter(i => i.userId !== uid)
-        saveDB(db)
-
-        deleteStep.delete(id)
-        return ctx.reply('🗑 已删除该用户记录')
-    }
-
-    // ================== 添加管理员 ==================
-    if (addAdminStep.get(id)) {
-
-        const uid = parseInt(text)
-
-        if (!db.admins.includes(uid)) db.admins.push(uid)
-
-        saveDB(db)
-        addAdminStep.delete(id)
-
-        return ctx.reply('✅ 已添加管理员')
-    }
-
-    // ================== 删除管理员 ==================
-    if (delAdminStep.get(id)) {
-
-        const uid = parseInt(text)
-
-        db.admins = db.admins.filter(a => a !== uid)
-
-        saveDB(db)
-        delAdminStep.delete(id)
-
-        return ctx.reply('🗑 已删除管理员')
-    }
-
-    // ================== 借款识别 ==================
     const match = text.match(/借款\s*([\d.]+)\s*([wW万]?)/)
     if (!match) return
 
     let amount = parseFloat(match[1])
-
-    if (isNaN(amount)) {
-        return ctx.reply('金额格式错误')
-    }
+    if (isNaN(amount)) return ctx.reply('金额错误')
 
     if (match[2]) {
         amount *= 10000
@@ -210,7 +177,6 @@ bot.on('text', (ctx) => {
     const userId = ctx.from.id
     const username = ctx.from.username || ctx.from.first_name
 
-    // 防重复借款
     if (db.loans.some(i => i.userId === userId && i.status === 'unpaid')) {
         return ctx.reply('⚠️ 你还有未还款')
     }
@@ -246,16 +212,8 @@ bot.on('text', (ctx) => {
 })
 
 // ================== 启动 ==================
-async function start() {
-    try {
-        await bot.launch()
-        console.log('🚀 钱庄系统已启动')
-    } catch (err) {
-        console.error('启动失败:', err)
-    }
-}
-
-start()
+bot.launch()
+console.log('🚀 钱庄系统已启动')
 
 process.once('SIGINT', () => bot.stop('SIGINT'))
 process.once('SIGTERM', () => bot.stop('SIGTERM'))
