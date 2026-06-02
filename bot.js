@@ -1,6 +1,5 @@
 const { Telegraf, Markup } = require('telegraf')
 const fs = require('fs')
-const cron = require('node-cron')
 
 const bot = new Telegraf(process.env.BOT_TOKEN)
 
@@ -23,7 +22,7 @@ function isAdmin(ctx, db) {
     return db.admins.includes(ctx.from.id)
 }
 
-// ================== 面板入口 ==================
+// ================== 面板 ==================
 bot.command('panel', (ctx) => {
     const db = loadDB()
     if (!isAdmin(ctx, db)) return ctx.reply('❌ 无权限')
@@ -40,9 +39,10 @@ bot.command('panel', (ctx) => {
     )
 })
 
-// ================== 借款列表 ==================
+// ================== callbacks ==================
 bot.action('loan_list', (ctx) => {
     const db = loadDB()
+    ctx.answerCbQuery()
 
     if (!db.loans.length) return ctx.reply('暂无记录')
 
@@ -54,9 +54,9 @@ bot.action('loan_list', (ctx) => {
     ctx.reply(msg)
 })
 
-// ================== 统计 ==================
 bot.action('stats', (ctx) => {
     const db = loadDB()
+    ctx.answerCbQuery()
 
     const total = db.loans.reduce((a,b)=>a+b.amount,0)
     const unpaid = db.loans.filter(i=>i.status==='unpaid').reduce((a,b)=>a+b.total,0)
@@ -71,8 +71,11 @@ bot.action('stats', (ctx) => {
     )
 })
 
-// ================== 标记还款（进入输入模式） ==================
+// ================== 输入状态 ==================
 const repayStep = new Map()
+const deleteStep = new Map()
+const addAdminStep = new Map()
+const delAdminStep = new Map()
 
 bot.action('repay_menu', (ctx) => {
     const db = loadDB()
@@ -82,9 +85,6 @@ bot.action('repay_menu', (ctx) => {
     ctx.reply('请输入要标记还款的用户名：')
 })
 
-// ================== 删除记录 ==================
-const deleteStep = new Map()
-
 bot.action('delete_menu', (ctx) => {
     const db = loadDB()
     if (!isAdmin(ctx, db)) return ctx.reply('❌ 无权限')
@@ -93,7 +93,6 @@ bot.action('delete_menu', (ctx) => {
     ctx.reply('请输入要删除的用户名：')
 })
 
-// ================== 管理员菜单 ==================
 bot.action('admin_menu', (ctx) => {
     const db = loadDB()
     if (!isAdmin(ctx, db)) return ctx.reply('❌ 无权限')
@@ -108,35 +107,31 @@ bot.action('admin_menu', (ctx) => {
     )
 })
 
-// ================== 添加管理员 ==================
-const addAdminStep = new Map()
-
 bot.action('add_admin', (ctx) => {
     addAdminStep.set(ctx.from.id, true)
     ctx.reply('请输入管理员ID：')
 })
-
-// ================== 删除管理员 ==================
-const delAdminStep = new Map()
 
 bot.action('del_admin', (ctx) => {
     delAdminStep.set(ctx.from.id, true)
     ctx.reply('请输入要删除的管理员ID：')
 })
 
-// ================== 管理员列表 ==================
 bot.action('list_admin', (ctx) => {
     const db = loadDB()
     ctx.reply('👮 管理员：\n' + db.admins.join('\n'))
 })
 
-// ================== 文本处理（输入模式） ==================
+// ================== ⭐ 统一消息入口（核心修复） ==================
 bot.on('text', (ctx) => {
+
     const db = loadDB()
     const id = ctx.from.id
-    const text = ctx.message.text
+    const text = ctx.message.text.trim()
 
-    // ===== repay =====
+    console.log('收到消息:', text)
+
+    // ========== repay ==========
     if (repayStep.get(id)) {
         const loan = db.loans.find(i => i.user === text && i.status === 'unpaid')
         if (!loan) return ctx.reply('未找到记录')
@@ -148,7 +143,7 @@ bot.on('text', (ctx) => {
         return ctx.reply('✅ 已标记还款')
     }
 
-    // ===== delete =====
+    // ========== delete ==========
     if (deleteStep.get(id)) {
         db.loans = db.loans.filter(i => i.user !== text)
         saveDB(db)
@@ -157,7 +152,7 @@ bot.on('text', (ctx) => {
         return ctx.reply('🗑 已删除')
     }
 
-    // ===== add admin =====
+    // ========== add admin ==========
     if (addAdminStep.get(id)) {
         const uid = parseInt(text)
         if (!db.admins.includes(uid)) db.admins.push(uid)
@@ -167,7 +162,7 @@ bot.on('text', (ctx) => {
         return ctx.reply('✅ 已添加管理员')
     }
 
-    // ===== del admin =====
+    // ========== del admin ==========
     if (delAdminStep.get(id)) {
         const uid = parseInt(text)
         db.admins = db.admins.filter(a => a !== uid)
@@ -176,35 +171,66 @@ bot.on('text', (ctx) => {
         delAdminStep.delete(id)
         return ctx.reply('🗑 已删除管理员')
     }
-})
 
-// ================== 自动借款识别 ==================
-bot.hears(/借款\s*([\d.]+w?)/i, (ctx) => {
-
-    const text = ctx.message.text
-
-    console.log('触发借款=', text)
-
-    const match = text.match(/借款\s*([\d.]+w?)/i)
+    // ========== ⭐ 借款识别（修复版） ==========
+    const match = text.match(/借款\s*([\d.]+)\s*([wW]?)/)
 
     if (!match) return
 
-    const amountText = match[1]
+    let amount = parseFloat(match[1])
 
-    const amount =
-        parseFloat(amountText) *
-        (amountText.toLowerCase().includes('w') ? 10000 : 1)
+    if (match[2]) {
+        amount *= 10000
+    }
 
     if (isNaN(amount)) {
         return ctx.reply('金额格式错误')
     }
 
-    ctx.reply(`借款金额：${amount}`)
+    const user = ctx.from.username || ctx.from.first_name
+
+    if (db.loans.some(i => i.user === user && i.status === 'unpaid')) {
+        return ctx.reply('⚠️ 你还有未还款')
+    }
+
+    const interest = amount * 0.3
+    const total = amount + interest
+
+    const due = new Date(Date.now() + 86400000)
+
+    db.loans.push({
+        user,
+        amount,
+        interest,
+        total,
+        time: new Date().toISOString(),
+        due: due.toISOString(),
+        status: 'unpaid'
+    })
+
+    saveDB(db)
+
+    ctx.reply(
+`📌 借款成功
+
+本金：${amount}
+利息：${interest}
+应还：${total}
+到期：${due.toLocaleString()}`
+    )
 })
 
-bot.on('text', (ctx) => {
-    console.log('收到文本:', ctx.message.text)
-})
+// ================== 启动（稳定版） ==================
+async function start() {
+    try {
+        await bot.launch()
+        console.log('🚀 panel bot running')
+    } catch (err) {
+        console.error('启动失败:', err)
+    }
+}
 
-bot.launch()
-console.log('🚀 panel bot running')
+start()
+
+process.once('SIGINT', () => bot.stop('SIGINT'))
+process.once('SIGTERM', () => bot.stop('SIGTERM'))
