@@ -179,40 +179,27 @@ bot.on('text', (ctx) => {
 })
 
 // ================== 自动借款识别 ==================
-bot.on('text', (ctx) => {
-    const text = ctx.message.text
-    const user = ctx.from.username || ctx.from.first_name
+bot.hears(/借款\s*([\d.]+w?)/i, (ctx) => {
 
-    const match = text.match(/(借款|借)\s*([\d.]+w?)/)
+    const text = ctx.message.text
+
+    console.log('触发借款=', text)
+
+    const match = text.match(/借款\s*([\d.]+w?)/i)
+
     if (!match) return
 
-    const amount = parseFloat(match[2]) * (match[2].includes('w') ? 10000 : 1)
+    const amountText = match[1]
 
-    const db = loadDB()
+    const amount =
+        parseFloat(amountText) *
+        (amountText.toLowerCase().includes('w') ? 10000 : 1)
 
-    if (db.loans.some(i => i.user === user && i.status === 'unpaid')) {
-        return ctx.reply('⚠️ 有未还款')
+    if (isNaN(amount)) {
+        return ctx.reply('金额格式错误')
     }
 
-    const interest = amount * 0.3
-    const total = amount + interest
-
-    const now = new Date()
-    const due = new Date(Date.now() + 86400000)
-
-    db.loans.push({
-        user,
-        amount,
-        interest,
-        total,
-        time: now.toISOString(),
-        due: due.toISOString(),
-        status: 'unpaid'
-    })
-
-    saveDB(db)
-
-    ctx.reply('📌 借款成功')
+    ctx.reply(`借款金额：${amount}`)
 })
 
 bot.launch()
