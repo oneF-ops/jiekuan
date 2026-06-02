@@ -202,5 +202,9 @@ bot.hears(/借款\s*([\d.]+w?)/i, (ctx) => {
     ctx.reply(`借款金额：${amount}`)
 })
 
+bot.on('text', (ctx) => {
+    console.log('收到文本:', ctx.message.text)
+})
+
 bot.launch()
 console.log('🚀 panel bot running')
